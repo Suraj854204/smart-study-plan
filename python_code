@@ -1,0 +1,196 @@
+import { SubjectWithTopics } from "@shared/schema";
+const PYTHON_API_BASE_URL = "/python-api";
+
+// Log the API URL being used
+console.log("Python scheduler API URL:", PYTHON_API_BASE_URL);
+
+export async function generateScheduleWithPython(
+  subjects: SubjectWithTopics[],
+  dailyHours: number
+): Promise<any> {
+  try {
+    // Try to use the Python API
+    try {
+      console.log("Attempting to connect to Python scheduler API...");
+      const response = await fetch(`${PYTHON_API_BASE_URL}/generate-schedule`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          subjects,
+          dailyHours,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || "Failed to generate schedule");
+      }
+
+      const result = await response.json();
+      console.log("Successfully generated schedule using Python API");
+      return result;
+    } catch (apiError) {
+      console.warn("Could not connect to Python scheduler API, using client-side fallback method", apiError);
+      
+      // Create a simple schedule if Python API is unavailable
+      const daysOfWeek = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+      const timeSlots = ["09:00", "10:00", "11:00", "13:00", "14:00", "15:00", "16:00", "17:00"];
+      
+      // Calculate priorities for subjects
+      const subjectsWithPriorities = subjects.map(subject => ({
+        ...subject,
+        priority: calculateSimplePriority(subject)
+      })).sort((a, b) => b.priority - a.priority);
+      
+      const schedule = [];
+      let subjectIndex = 0;
+      let topicIndex = 0;
+      
+      // Generate simple round-robin schedule
+      for (const day of daysOfWeek) {
+        for (const time of timeSlots) {
+          // Skip if all subjects are processed
+          if (subjectsWithPriorities.length === 0) continue;
+          
+          // Get current subject and rotate
+          if (subjectIndex >= subjectsWithPriorities.length) {
+            subjectIndex = 0;
+          }
+          
+          const currentSubject = subjectsWithPriorities[subjectIndex];
+          const topics = currentSubject.topics.filter(t => !t.completed);
+          
+          // Skip if no uncompleted topics
+          if (topics.length > 0) {
+            if (topicIndex >= topics.length) {
+              topicIndex = 0;
+            }
+            
+            const currentTopic = topics[topicIndex];
+            
+            // Add slot to schedule
+            schedule.push({
+              day,
+              startTime: time,
+              subjectId: currentSubject.id,
+              topicId: currentTopic.id
+            });
+            
+            topicIndex++;
+          }
+          
+          subjectIndex++;
+        }
+      }
+      
+      return {
+        schedule,
+        dailyHours,
+        generatedAt: new Date().toISOString(),
+        metadata: {
+          generatedBy: "client-fallback",
+          subjects: subjectsWithPriorities
+        }
+      };
+    }
+  } catch (error) {
+    console.error("Error generating schedule:", error);
+    throw error;
+  }
+}
+
+/**
+ * Calculate priorities for subjects using the Python scheduler API
+ */
+export async function calculatePriorities(subjects: SubjectWithTopics[]) {
+  try {
+    // Try to use the Python API
+    try {
+      const response = await fetch(`${PYTHON_API_BASE_URL}/calculate-priorities`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          subjects,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || "Failed to calculate priorities");
+      }
+
+      return response.json();
+    } catch (apiError) {
+      console.warn("Could not connect to Python scheduler API, using fallback method", apiError);
+      
+      // Use the fallback method if the Python API is unavailable
+      const priorities = subjects.map(subject => ({
+        id: subject.id,
+        name: subject.name,
+        priority_score: calculateSimplePriority(subject)
+      }));
+      
+      // Sort by priority (highest first)
+      priorities.sort((a, b) => b.priority_score - a.priority_score);
+      
+      return { priorities };
+    }
+  } catch (error) {
+    console.error("Error calculating priorities:", error);
+    throw error;
+  }
+}
+
+/**
+ * Simple priority calculation as a fallback method
+ */
+function calculateSimplePriority(subject: SubjectWithTopics): number {
+  // Default medium priority
+  let priority = 50;
+  
+  // If there's an exam date, increase priority as date approaches
+  if (subject.examDate) {
+    const today = new Date();
+    const examDate = new Date(subject.examDate);
+    const daysUntilExam = Math.max(1, Math.floor((examDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)));
+    
+    // Exponentially increase priority as exam gets closer
+    if (daysUntilExam <= 7) {
+      // Within a week: highest priority
+      priority = 100;
+    } else if (daysUntilExam <= 14) {
+      // Within two weeks: high priority
+      priority = 80;
+    } else if (daysUntilExam <= 30) {
+      // Within a month: medium-high priority
+      priority = 65;
+    } else {
+      // More than a month away: medium-low priority
+      priority = 40;
+    }
+  }
+  
+  // Adjust based on difficulty
+  if (subject.difficulty === "hard") {
+    priority += 15;
+  } else if (subject.difficulty === "easy") {
+    priority -= 10;
+  }
+  
+  // Adjust based on topic completion
+  const totalTopics = subject.topics.length;
+  if (totalTopics > 0) {
+    const completedTopics = subject.topics.filter(t => t.completed).length;
+    const completionRatio = completedTopics / totalTopics;
+    
+    // Lower priority if mostly completed, higher if mostly incomplete
+    priority = priority * (1 + (0.5 - completionRatio) / 2);
+  }
+  
+  // Ensure priority is within bounds
+  return Math.max(1, Math.min(100, Math.round(priority)));
+}
